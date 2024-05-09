@@ -151,8 +151,9 @@ def get_complex_array(array_m, array_p):
     p_min = np.min(array_p)
     if p_min < 0: # range [-pi, pi]
         array_p = array_p / p_max * np.pi
-    elif p_min >= 0: # range [0, 2.*pi]
-        array_p = array_p / p_max * 2.*np.pi
+    elif p_min >= 0: # range (0, 2.*pi]
+        if p_max > 0:
+            array_p = array_p / p_max * 2.*np.pi
     return (array_m * np.cos(array_p) + 1j * array_m * np.sin(array_p))
 # Reconstruct a complex image array from an ITK image pair
 # Return as a tuple of numpy array, origin, spacing and direction.
@@ -222,6 +223,13 @@ def getDirectionName(sitk_image):
         return 'COR'
     else:
         return 'Reformat'
+# Scales the pixel intensity of image to values between a given interval (default = 0.0, 1.0)
+def intensityScaleItk(sitk_input, min_output=0.0, max_output=1.0):
+    # Use intensity rescaling filter
+    intensityRescaleFilter = sitk.RescaleIntensityImageFilter()
+    intensityRescaleFilter.SetOutputMaximum(max_output) #16 bit
+    intensityRescaleFilter.SetOutputMinimum(min_output)
+    return intensityRescaleFilter.Execute(sitk_input)
 # Get mean intensity difference given two sitkImages
 # Useful to calculate the phase shift between two phase images
 def getMeanIntensityShift(sitkImage1, sitkImage2, mask):
@@ -478,3 +486,42 @@ def getFlippedPoint(sitkReference, point_phys, dir='vertical'):
     # Convert the flipped index back to physical point
     flipped_point_phys = sitkReference.TransformIndexToPhysicalPoint(indexFlip)
     return flipped_point_phys
+
+# Applies a Gaussian smoothing filter to an image, with conditional padding if necessary
+# Inputs: 
+#       sitkImage: The original image to which the Gaussian filter should be applied.
+#       sigma: Float with standard deviation of the Gaussian smoothing filter.
+# Output:
+#       The smoothed image
+def blurItk(sitkImage, sigma):
+# Determine the minimum size required to avoid boundary issues.
+    # This value will depend on the Gaussian sigma.
+    min_size = max(4,int(2 * sigma + 1))
+    # Calculate the padding needed for each dimension
+    pad_lower = []
+    pad_upper = []
+    for dim in sitkImage.GetSize():
+        if dim < min_size:
+            padding_required = min_size - dim
+            pad_lower.append(padding_required // 2)
+            pad_upper.append(padding_required - (padding_required // 2))
+        else:
+            pad_lower.append(0)
+            pad_upper.append(0)
+    # Check if any padding is necessary
+    needs_padding = any(pad > 0 for pad in pad_lower + pad_upper)
+    if needs_padding:
+        # Apply padding
+        padded_img = sitk.ConstantPad(sitkImage, pad_lower, pad_upper, 0)
+        # Apply Gaussian filter to padded image
+        gaussian_filter = sitk.SmoothingRecursiveGaussianImageFilter()
+        gaussian_filter.SetSigma(sigma)
+        smoothed_padded_img = gaussian_filter.Execute(padded_img)
+        # Crop back to original dimensions
+        result_img = sitk.Crop(smoothed_padded_img, pad_lower, pad_upper)
+    else:
+        # Directly apply the Gaussian filter without padding
+        gaussian_filter = sitk.SmoothingRecursiveGaussianImageFilter()
+        gaussian_filter.SetSigma(sigma)
+        result_img = gaussian_filter.Execute(sitkImage)
+    return result_img
