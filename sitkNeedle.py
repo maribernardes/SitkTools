@@ -87,10 +87,21 @@ def interpolateArtifacts(artifact_json_path, angle_list, target_angle=None):
     interpolated_m = image1_m + image2_m
     interpolated_p = image1_p + image2_p
     return (interpolated_m, interpolated_p, rotatedBase, rotatedTip, target_angle)
+
+def createResidualSignalArtifact(sitkReference, position, radius_mm=1.0, sigma=5.0):
+    # Position (physical) - LPS
+    initialY = sitkReference.GetOrigin()[2]
+    endY = initialY - sitkReference.GetSpacing()[1]*(sitkReference.GetSize()[1]-1)
+    base = np.array([position[0], position[1], endY])
+    tip = np.array([position[0], position[1], initialY])
+    # Create a vertical line in the middle of the image
+    line_image = createLine(sitkReference, base, tip, radius_mm=radius_mm, drawOver=False, outputType=sitk.sitkFloat32, backgroundPixelValue=1.0, linePixelValue=0.0)
+    return blurItk(line_image, sigma)    
+    
 # Create Needle Labelmap: takes a given image and draws a white line at the provided base and tip physical positions
 # If line width is omitted, use 1px width
 # If drawOver is True, the cilinder is added on top of sitkReference, if False the cilinder is added to an empty image
-def createLine(sitkReference, base, tip, radius_mm=1.0, drawOver=False, defaultPixelValue=255):
+def createLine(sitkReference, base, tip, radius_mm=1.0, drawOver=False, backgroundPixelValue=0, linePixelValue=255, outputType=sitk.sitkUInt8):
     # Get the image size and dimensions
     spacing = sitkReference.GetSpacing()
     size = sitkReference.GetSize()
@@ -99,7 +110,7 @@ def createLine(sitkReference, base, tip, radius_mm=1.0, drawOver=False, defaultP
     if drawOver is True:
         image_array = sitk.GetArrayFromImage(sitkReference)
     else:
-        image_array = np.zeros((depth, height, width))
+        image_array = backgroundPixelValue*np.ones((depth, height, width))
     # Convert start and end points to pixel coordinates
     baseIndex = sitkReference.TransformPhysicalPointToContinuousIndex(base)
     tipIndex = sitkReference.TransformPhysicalPointToContinuousIndex(tip)
@@ -126,9 +137,9 @@ def createLine(sitkReference, base, tip, radius_mm=1.0, drawOver=False, defaultP
                 for d in range(-radius_z, radius_z + 1):
                     nx, ny, nz = x + w, y + h, z + d
                     if 0 <= nx < width and 0 <= ny < height and 0 <= nz < depth:
-                        image_array[nz, ny, nx] = defaultPixelValue
+                        image_array[nz, ny, nx] = linePixelValue
     # Create a new SimpleITK image from the modified array
-    sitkResult = sitk.Cast(sitk.GetImageFromArray(image_array), sitk.sitkUInt8)
+    sitkResult = sitk.Cast(sitk.GetImageFromArray(image_array), outputType)
     # Set the same origin, spacing, and direction as the input image
     sitkResult.SetOrigin(sitkReference.GetOrigin())
     sitkResult.SetSpacing(sitkReference.GetSpacing())
