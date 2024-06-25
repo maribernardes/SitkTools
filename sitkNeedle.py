@@ -3,7 +3,7 @@ import numpy as np
 import math
 import os
 import json
-from sitkUtils import *
+from sitkTools import *
 
 ##########################################################
 ## NEEDLE ARTIFACT UTILS
