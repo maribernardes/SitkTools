@@ -223,13 +223,80 @@ def getDirectionName(sitk_image):
         return 'COR'
     else:
         return 'Reformat'
+# Scales the pixel intensity of image to values between a given interval (default = 0.0, 1.0), but treat slices independently
+def intensityScaleEachSliceItk(sitk_input, min_output=0.0, max_output=1.0):
+    # Extract metadata from the input image
+    original_direction = sitk_input.GetDirection()
+    original_spacing = sitk_input.GetSpacing()
+    original_origin = sitk_input.GetOrigin()
+     # Process each slice independently
+    slices = [sitk.Extract(sitk_input, (sitk_input.GetSize()[0], sitk_input.GetSize()[1], 0), (0, 0, z))
+              for z in range(sitk_input.GetSize()[2])]
+    rescaled_slices = []
+    for slice in slices:
+        intensityRescaleFilter = sitk.RescaleIntensityImageFilter()
+        intensityRescaleFilter.SetOutputMaximum(max_output)
+        intensityRescaleFilter.SetOutputMinimum(min_output)
+        rescaled_slices.append(intensityRescaleFilter.Execute(slice))
+    # Stack slices back into a volume
+    rescaled_volume = sitk.JoinSeries(rescaled_slices)
+    # Adjust metadata to match the original image
+    rescaled_volume.SetDirection(original_direction)
+    rescaled_volume.SetSpacing((original_spacing[0], original_spacing[1], original_spacing[2]))
+    rescaled_volume.SetOrigin(original_origin)
+    return rescaled_volume
 # Scales the pixel intensity of image to values between a given interval (default = 0.0, 1.0)
-def intensityScaleItk(sitk_input, min_output=0.0, max_output=1.0):
-    # Use intensity rescaling filter
-    intensityRescaleFilter = sitk.RescaleIntensityImageFilter()
-    intensityRescaleFilter.SetOutputMaximum(max_output) #16 bit
-    intensityRescaleFilter.SetOutputMinimum(min_output)
-    return intensityRescaleFilter.Execute(sitk_input)
+def intensityScaleItk(sitk_input, min_output=0.0, max_output=1.0, slices_independent=False):
+    if slices_independent is True:
+        return intensityScaleEachSliceItk(sitk_input, min_output=min_output, max_output=max_output)
+    else:     
+        # Use intensity rescaling filter
+        intensityRescaleFilter = sitk.RescaleIntensityImageFilter()
+        intensityRescaleFilter.SetOutputMaximum(max_output) #16 bit
+        intensityRescaleFilter.SetOutputMinimum(min_output)
+        return intensityRescaleFilter.Execute(sitk_input)
+import SimpleITK as sitk
+import random
+
+# Randomly adjust the contrast of a SimpleITK image.
+#   sitk_input (SimpleITK.Image): The input image (assumed to have intensities in [0.0, 1.0]).
+#   contrast_range (tuple): The range of random contrast scaling factors (default: 0.9 to 1.1).
+#   min_output (float): The minimum value of the output range.
+#   max_output (float): The maximum value of the output range.
+def randomContrastItk(sitk_input, contrast_range=(0.9, 1.1), min_output=0.0, max_output=1.0):
+    # Generate a random contrast scaling factor
+    contrast_factor = random.uniform(*contrast_range)
+    sitk_input = intensityScaleItk(sitk_input)
+    # Calculate the mean intensity of the image
+    stats_filter = sitk.StatisticsImageFilter()
+    stats_filter.Execute(sitk_input)
+    mean_intensity = stats_filter.GetMean()
+    # Adjust contrast using the formula: adjusted = mean + factor * (original - mean)
+    sitk_adjusted = sitk.Cast(sitk_input, sitk.sitkFloat32)
+    sitk_adjusted = mean_intensity + contrast_factor * (sitk_adjusted - mean_intensity)
+    # Clamp the adjusted intensities to the specified range
+    sitk_adjusted = sitk.Clamp(sitk_adjusted, sitk.sitkFloat32, min_output, max_output)
+    return sitk_adjusted
+# Calculate an intensity mean value based on the intensity of a background image and a min/max scale
+# The value is scaled between min_value and max_value.
+#   background_image (SimpleITK.Image): The background image for intensity reference.
+#   min_value (float): The minimum value of the output range.
+#   max_value (float): The maximum value of the output range.
+def calculateIntensityMeanItk(background_image, min_value=0.3, max_value=0.6):
+    # Calculate statistics of the background image
+    stats_filter = sitk.StatisticsImageFilter()
+    stats_filter.Execute(background_image)
+    mean_intensity = stats_filter.GetMean()
+    min_intensity = stats_filter.GetMinimum()
+    max_intensity = stats_filter.GetMaximum()
+    # Normalize the mean intensity to a [0, 1] range
+    if max_intensity != min_intensity:  # Avoid division by zero
+        normalized_mean = (mean_intensity - min_intensity) / (max_intensity - min_intensity)
+    else:
+        normalized_mean = 0  # Default to 0 if the range is zero (constant image)
+    # Map normalized mean to the desired range [min_value, max_value]
+    intensity_mean = min_value + (max_value - min_value) * normalized_mean
+    return intensity_mean    
 # Get mean intensity difference given two sitkImages
 # Useful to calculate the phase shift between two phase images
 def getMeanIntensityShift(sitkImage1, sitkImage2, mask):
@@ -493,7 +560,7 @@ def getFlippedPoint(sitkReference, point_phys, dir='vertical'):
 #       sigma: Float with standard deviation of the Gaussian smoothing filter.
 # Output:
 #       The smoothed image
-def blurItk(sitkImage, sigma):
+def blurItk(sitkImage, sigma, background_value=0.0):
 # Determine the minimum size required to avoid boundary issues.
     # This value will depend on the Gaussian sigma.
     min_size = max(4,int(2 * sigma + 1))
@@ -512,7 +579,7 @@ def blurItk(sitkImage, sigma):
     needs_padding = any(pad > 0 for pad in pad_lower + pad_upper)
     if needs_padding:
         # Apply padding
-        padded_img = sitk.ConstantPad(sitkImage, pad_lower, pad_upper, 0)
+        padded_img = sitk.ConstantPad(sitkImage, pad_lower, pad_upper, background_value)
         # Apply Gaussian filter to padded image
         gaussian_filter = sitk.SmoothingRecursiveGaussianImageFilter()
         gaussian_filter.SetSigma(sigma)

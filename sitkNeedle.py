@@ -88,15 +88,24 @@ def interpolateArtifacts(artifact_json_path, angle_list, target_angle=None):
     interpolated_p = image1_p + image2_p
     return (interpolated_m, interpolated_p, rotatedBase, rotatedTip, target_angle)
 
+# Current implemented only for CORONAL images.
+#TODO: make it generic to any oriented volume
 def createResidualSignalArtifact(sitkReference, position, radius_mm=1.0, sigma=5.0):
+    refSize = sitkReference.GetSize()
+    refSpacing = sitkReference.GetSpacing() 
+    refOrigin = sitkReference.GetOrigin()
     # Position (physical) - LPS
-    initialY = sitkReference.GetOrigin()[2]
-    endY = initialY - sitkReference.GetSpacing()[1]*(sitkReference.GetSize()[1]-1)
-    base = np.array([position[0], position[1], endY])
-    tip = np.array([position[0], position[1], initialY])
-    # Create a vertical line in the middle of the image
-    line_image = createLine(sitkReference, base, tip, radius_mm=radius_mm, drawOver=False, outputType=sitk.sitkFloat32, backgroundPixelValue=1.0, linePixelValue=0.0)
-    return blurItk(line_image, sigma)    
+    minY = refOrigin[2]
+    maxY = minY - refSpacing[1]*(refSize[1]-1)
+    # Create a vertical line in the middle of the images
+    combined_artifact = createBlankItk(sitkReference, type=sitk.sitkFloat32, pixelValue=1.0)
+    for slice in range(refSize[2]):
+        slice_position = refOrigin[1] + slice * refSpacing[2] # Origin for CORONAL orientation. TODO: Make generic
+        startPoint = np.array([position[0], slice_position, minY])
+        endPoint = np.array([position[0], slice_position, maxY])
+        line_image = createLine(sitkReference, startPoint, endPoint, radius_mm=radius_mm, outputType=sitk.sitkFloat32, drawOver=False, backgroundPixelValue=1.0, linePixelValue=0.0)
+        combined_artifact =  sitk.Multiply(combined_artifact, line_image)
+    return blurItk(combined_artifact, sigma)    
     
 # Create Needle Labelmap: takes a given image and draws a white line at the provided base and tip physical positions
 # If line width is omitted, use 1px width
