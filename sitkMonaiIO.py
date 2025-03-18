@@ -406,3 +406,374 @@ class PushSitkImaged(MapTransform):
             # Adapt to output the sitk image
             img[key] = self.saver(img=d[key], meta_data=meta_data)
         return img
+    
+
+class SelectChannel(Transform):
+    """
+    Select specific channels from a multi-channel tensor.
+
+    Args:
+        indices (int or list of int): Indices of the channels to keep.
+
+    Example:
+        transform = SelectChannel(indices=0)  # Keep only the first channel
+    """
+
+    def __init__(self, indices):
+        self.indices = indices if isinstance(indices, (list, tuple)) else [indices]
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if data.ndim < 3:
+            raise ValueError(f"Expected a multi-channel tensor, but got shape {data.shape}")
+
+        return data[self.indices]  # Select specified channels
+
+class SelectChanneld(MapTransform):
+    """
+    Dictionary-based transform to select specific channels from a multi-channel tensor.
+
+    Args:
+        keys (str or list of str): Key(s) of the tensors to modify.
+        indices (int or list of int): Indices of the channels to keep.
+
+    Example:
+        transform = SelectChanneld(keys="image", indices=0)  # Keep only the first channel
+    """
+
+    def __init__(self, keys, indices):
+        super().__init__(keys)
+        self.transform = SelectChannel(indices)
+
+    def __call__(self, data):
+        for key in self.keys:
+            data[key] = self.transform(data[key])  # Call the tensor transform
+        return data
+
+
+
+class ScaleIntensityPerChannel(Transform):
+    """
+    Scales intensity values per channel independently to the given min/max range.
+
+    Args:
+        min_max_values (list of tuples): List of (minv, maxv) for each channel.
+    """
+
+    def __init__(self, min_max_values):
+        self.min_max_values = min_max_values
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if data.shape[0] != len(self.min_max_values):
+            raise ValueError(f"Expected {len(self.min_max_values)} channels, but got {data.shape[0]}")
+
+        scaled_channels = []
+        for i, (minv, maxv) in enumerate(self.min_max_values):
+            min_intensity, max_intensity = data[i].min(), data[i].max()
+            if max_intensity == min_intensity:  # Avoid division by zero
+                scaled = torch.full_like(data[i], minv)
+            else:
+                scaled = ((data[i] - min_intensity) / (max_intensity - min_intensity)) * (maxv - minv) + minv
+            scaled_channels.append(scaled)
+
+        return torch.stack(scaled_channels, dim=0)
+
+
+class ScaleIntensityPerChanneld(MapTransform):
+    """
+    Dictionary-based transform to scale intensity values per channel independently.
+
+    Args:
+        keys (list): Keys to apply transformation.
+        min_max_values (list of tuples): List of (minv, maxv) for each channel.
+    """
+
+    def __init__(self, keys, min_max_values):
+        super().__init__(keys)
+        self.transform = ScaleIntensityPerChannel(min_max_values)
+
+    def __call__(self, data):
+        for key in self.keys:
+            data[key] = self.transform(data[key])  # Call tensor version
+        return data
+
+
+class MagPhaseToRealImag(Transform):
+    """
+    MONAI Transform to convert a tensor with magnitude in the first channel and phase in the second channel
+    into a tensor with real and imaginary components. Supports both 2D and 3D images.
+
+    Input:
+        - Tensor shape: (2, H, W) or (2, D, H, W) where:
+            - Channel 0: Magnitude
+            - Channel 1: Phase (radians)
+
+    Output:
+        - Tensor shape: (2, H, W) or (2, D, H, W) where:
+            - Channel 0: Real part
+            - Channel 1: Imaginary part
+    """
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if data.ndim not in [3, 4] or data.shape[0] != 2:
+            raise ValueError("Input tensor must have shape (2, H, W) for 2D or (2, D, H, W) for 3D.")
+
+        magnitude = data[0]
+        phase = data[1]
+
+        # Convert to Real and Imaginary parts
+        real = magnitude * torch.cos(phase)
+        imag = magnitude * torch.sin(phase)
+
+        return torch.stack((real, imag), dim=0)
+
+
+class MagPhaseToRealImagd(MapTransform):
+    """
+    Dictionary-based MONAI Transform to convert a concatenated magnitude-phase tensor 
+    into real and imaginary components. Supports both 2D and 3D images.
+
+    This assumes the input tensor has been combined using `ConcatItemsd`, with:
+        - Channel 0: Magnitude
+        - Channel 1: Phase (radians)
+
+    The transform **does not change the key name**, only modifies its contents.
+
+    Args:
+        keys (list): List containing a **single key** that holds the (2, H, W) or (2, D, H, W) concatenated tensor.
+    """
+
+    def __init__(self, keys):
+        super().__init__(keys)
+        if len(keys) != 1:
+            raise ValueError("keys must contain exactly one element, referring to the concatenated (magnitude, phase) tensor.")
+
+        self.transform = MagPhaseToRealImag()
+
+    def __call__(self, data):
+        key = self.keys[0]
+        data[key] = self.transform(data[key])  # Call tensor version
+        return data
+
+
+class ComplexToMagPhase(Transform):
+    """
+    Convert a complex-valued tensor into a 2-channel tensor with magnitude and phase.
+
+    Input: (H, W) or (D, H, W) complex tensor
+    Output: (2, H, W) or (2, D, H, W) tensor with:
+        - Channel 0: Magnitude
+        - Channel 1: Phase
+    """
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if not torch.is_complex(data):
+            raise ValueError("Input tensor must be a complex-valued tensor.")
+
+        magnitude = torch.abs(data)
+        phase = torch.angle(data)
+        return torch.stack((magnitude, phase), dim=0)
+
+    
+class ComplexToMagPhased(MapTransform):
+    """
+    Dictionary-based transform to convert a complex-valued tensor into a 2-channel tensor (magnitude, phase).
+
+    Args:
+        keys (str): Input key for the complex tensor.
+        name (str): Output key for the 2-channel (magnitude, phase) tensor.
+
+    Example:
+        transform = ComplexToMagPhased(keys="complex_image", name="mag_phase_tensor")
+    """
+
+    def __init__(self, keys, name):
+        super().__init__(keys)
+        self.input_key = keys
+        self.name = name
+        self.transform = ComplexToMagPhase()
+
+    def __call__(self, data):
+        complex_tensor = data[self.input_key]
+
+        # Convert to magnitude and phase using the tensor transform
+        data[self.name] = self.transform(complex_tensor)
+
+        # Remove the intermediate complex representation
+        del data[self.input_key]
+        return data
+
+
+
+class MagPhaseToComplex(Transform):
+    """
+    Convert a 2-channel tensor (magnitude, phase) into a complex-valued tensor.
+
+    Input: (2, H, W) or (2, D, H, W) tensor
+    Output: (H, W) or (D, H, W) complex tensor
+    """
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if data.shape[0] != 2:
+            raise ValueError("Input tensor must have two channels: (magnitude, phase).")
+
+        magnitude = data[0]
+        phase = data[1]
+        return magnitude * torch.exp(1j * phase)
+
+
+class ComplexToMagPhased(MapTransform):
+    """
+    Dictionary-based transform to convert a 2-channel tensor (complex-valued) into magnitude and phase.
+
+    Args:
+        keys (str): Input key for the 2-channel (real, imag) tensor.
+        name (str): Output key for the converted (2, H, W) or (2, D, H, W) tensor.
+
+    Example:
+        transform = ComplexToMagPhased(keys="complex_tensor", name="mag_phase_tensor")
+    """
+
+    def __init__(self, keys, name):
+        super().__init__(keys)
+        self.input_key = keys
+        self.name = name
+        self.transform = ComplexToMagPhase()
+
+    def __call__(self, data):
+        tensor = data[self.input_key]
+
+        if tensor.shape[0] != 2:
+            raise ValueError("Expected input tensor with shape (2, H, W) or (2, D, H, W), containing real and imaginary channels.")
+
+        # Convert to magnitude and phase using the tensor transform
+        data[self.name] = self.transform(torch.view_as_complex(tensor.movedim(0, -1)))  # Convert to complex format
+
+        # Remove the intermediate input key
+        del data[self.input_key]
+        return data
+
+
+class RandKSpaceSpikeNoiseMagPhase(Transform):
+    """
+    Applies randomized k-space spike noise to a 2D or 3D (magnitude, phase) tensor.
+
+    - **Channel 0:** Magnitude
+    - **Channel 1:** Phase (in radians)
+
+    Supports input tensors with shape (2, H, W) or (2, D, H, W).
+    If the input shape is (2, W, H, D), set `reorder_axes=True` to fix the order before processing.
+
+    Args:
+        prob (float): Probability of applying the transform.
+        intensity_range (tuple): Min and max random intensity for the k-space spike (in log scale).
+        reorder_axes (bool): If `True`, swaps (2, W, H, D) → (2, D, H, W) before processing.
+        phase_range (tuple): Optional (min, max) range for the phase values. Defaults to (-π, π).
+    """
+
+    def __init__(self, prob=0.5, intensity_range=(11, 12), reorder_axes=False, phase_range=(-torch.pi, torch.pi)):
+        self.prob = prob
+        self.intensity_range = intensity_range
+        self.reorder_axes = reorder_axes
+        self.phase_range = phase_range
+
+        if self.phase_range[1] <= self.phase_range[0]:
+            raise ValueError(f"Invalid phase range: {self.phase_range}. Expected (min, max) with max > min.")
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        if data.shape[0] != 2:
+            raise ValueError("Expected a 2-channel tensor with (Magnitude, Phase).")
+
+        # Apply axis reordering if needed
+        if self.reorder_axes and len(data.shape) == 4:  # If 3D (2, W, H, D)
+            data = data.permute(0, 3, 2, 1)  # Swap to (2, D, H, W)
+            reorder_back = True
+        else:
+            reorder_back = False
+
+        # Extract magnitude and phase
+        magnitude = data[0]
+        phase = data[1]
+
+        # Convert to complex representation
+        complex_image = magnitude * torch.exp(1j * phase)
+
+        # Apply FFT to move to k-space
+        kspace = torch.fft.fftn(complex_image)
+        kspace = torch.fft.fftshift(kspace)  # Shift zero frequency to center
+
+        # Determine spike location uniformly across k-space
+        spatial_dims = magnitude.shape
+        spike_location = tuple(torch.randint(0, dim, (1,)).item() for dim in spatial_dims)
+
+        # Sample spike intensity from a log-uniform distribution
+        log_intensity = torch.FloatTensor(1).uniform_(*self.intensity_range).item()
+        intensity = 10 ** log_intensity
+        spike_value = intensity * (torch.randn(()).item() + 1j * torch.randn(()).item())
+
+        # Apply k-space spike
+        kspace[spike_location] += spike_value
+
+        # Enforce Hermitian symmetry
+        symmetric_location = tuple((dim - loc) % dim for loc, dim in zip(spike_location, spatial_dims))
+        kspace[symmetric_location] += spike_value.conjugate()
+
+        # Apply inverse FFT to return to image domain
+        kspace = torch.fft.ifftshift(kspace)  # Reverse shift before IFFT
+        noisy_complex_image = torch.fft.ifftn(kspace)
+
+        # Convert back to magnitude and phase
+        magnitude_noisy = torch.abs(noisy_complex_image)
+
+        # Ensure phase values are wrapped within the given range
+        phase_min, phase_max = self.phase_range
+        phase_range_span = phase_max - phase_min
+        phase_noisy = ((torch.angle(noisy_complex_image) - phase_min) % phase_range_span) + phase_min
+
+        # Stack back into the original format
+        output = torch.stack((magnitude_noisy, phase_noisy), dim=0)
+
+        # If the input was (2, W, H, D), reorder it back
+        if reorder_back:
+            output = output.permute(0, 3, 2, 1)  # Swap back to (2, W, H, D)
+
+        return output
+
+
+
+class RandKSpaceSpikeNoiseMagPhased(MapTransform):
+    """
+    Dictionary-based transform applying k-space spike noise to a 2D or 3D (magnitude, phase) tensor.
+
+    Ensures k-space symmetry and proper spike scaling for visible striping patterns.
+
+    Args:
+        keys (str): Key of the input tensor in the dictionary.
+        prob (float): Probability of applying the transform.
+        intensity_range (tuple): Min and max random intensity for the k-space spike.
+        location_range (tuple, optional): (x_min, x_max, y_min, y_max) range for spike placement.
+        reorder_axes (bool): If `True`, swaps (2, W, H, D) → (2, D, H, W) before processing.
+    """
+
+    def __init__(self, keys, prob=0.5, intensity_range=(10, 50), reorder_axes=False, phase_range=(-np.pi, np.pi)):
+        super().__init__(keys)
+        self.prob = prob
+        self.intensity_range = intensity_range
+        self.reorder_axes = reorder_axes
+        self.phase_range = phase_range
+
+    def __call__(self, data):
+        key = self.keys[0]
+        tensor = data[key]
+
+        if tensor.shape[0] != 2:
+            raise ValueError(f"Expected a 2-channel tensor (Magnitude, Phase), but got shape {tensor.shape}")
+
+        transform = RandKSpaceSpikeNoiseMagPhase(
+            prob=self.prob,
+            intensity_range=self.intensity_range,
+            reorder_axes=self.reorder_axes,
+            phase_range=self.phase_range
+        )
+
+        data[key] = transform(tensor)
+        return data
