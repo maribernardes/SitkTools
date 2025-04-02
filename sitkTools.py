@@ -450,11 +450,11 @@ def cropItk(sitkImage, crop_size, side='top'):
     if side == 'top':
         start_index[1] = crop_size
     elif side == 'bottom':
-        start_index[1] = original_size[1] - crop_size
+        start_index[1] = 0 #original_size[1] - crop_size
     elif side == 'left':
         start_index[0] = crop_size
     elif side == 'right':
-        start_index[0] = original_size[0] - crop_size
+        start_index[0] = 0 #original_size[0] - crop_size
     else:
         print('Invalid side option')
         return None
